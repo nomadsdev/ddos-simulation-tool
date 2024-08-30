@@ -7,6 +7,7 @@
 
 #define MAX_USER_AGENTS 100
 #define BUFFER_SIZE 1024
+#define DEFAULT_THREAD_COUNT 100
 
 typedef struct {
     char *url;
@@ -36,7 +37,7 @@ void add_useragent(Requester *req) {
         }
         fclose(file);
     } else {
-        printf("File %s not found.\n", file_path);
+        fprintf(stderr, "File %s not found.\n", file_path);
     }
 }
 
@@ -51,65 +52,66 @@ void set_request_headers(HINTERNET hConnect, Requester *req) {
     snprintf(user_agent, BUFFER_SIZE, "User-Agent: %s\r\n", random_user_agent(req));
     char cache_control[BUFFER_SIZE];
     snprintf(cache_control, BUFFER_SIZE, "Cache-Control: no-cache\r\n");
-    
+
     char headers[BUFFER_SIZE];
     snprintf(headers, BUFFER_SIZE, "%s%s", user_agent, cache_control);
-    
+
     DWORD timeout = 60000;
     if (!InternetSetOption(hConnect, INTERNET_OPTION_RECEIVE_TIMEOUT, &timeout, sizeof(timeout))) {
-        printf("Failed to set receive timeout: %ld\n", GetLastError());
+        fprintf(stderr, "Failed to set receive timeout: %ld\n", GetLastError());
     }
     if (!InternetSetOption(hConnect, INTERNET_OPTION_SEND_TIMEOUT, &timeout, sizeof(timeout))) {
-        printf("Failed to set send timeout: %ld\n", GetLastError());
+        fprintf(stderr, "Failed to set send timeout: %ld\n", GetLastError());
     }
 }
 
 void send_request(Requester *req) {
     HINTERNET hInternet = InternetOpen(TEXT("HTTP Agent"), INTERNET_OPEN_TYPE_DIRECT, NULL, NULL, 0);
-    if (hInternet) {
-        DWORD flags = INTERNET_FLAG_RELOAD | INTERNET_FLAG_NO_CACHE_WRITE;
-        if (req->ssl) {
-            flags |= INTERNET_FLAG_SECURE;
-        }
-        
-        char url[BUFFER_SIZE];
-        snprintf(url, BUFFER_SIZE, "%s://%s:%d", req->ssl ? "https" : "http", req->url, req->port);
-
-        HINTERNET hConnect = InternetOpenUrl(hInternet, url, NULL, 0, flags, 0);
-        if (hConnect) {
-            set_request_headers(hConnect, req);
-            
-            char buffer[BUFFER_SIZE];
-            DWORD bytes_read;
-            while (InternetReadFile(hConnect, buffer, sizeof(buffer) - 1, &bytes_read) && bytes_read > 0) {
-                buffer[bytes_read] = '\0';
-            }
-            
-            InternetCloseHandle(hConnect);
-        } else {
-            printf("Failed to connect to %s: %ld\n", url, GetLastError());
-        }
-        InternetCloseHandle(hInternet);
-    } else {
-        printf("Failed to open internet connection: %ld\n", GetLastError());
+    if (!hInternet) {
+        fprintf(stderr, "Failed to open internet connection: %ld\n", GetLastError());
+        return;
     }
+
+    DWORD flags = INTERNET_FLAG_RELOAD | INTERNET_FLAG_NO_CACHE_WRITE;
+    if (req->ssl) {
+        flags |= INTERNET_FLAG_SECURE;
+    }
+
+    char url[BUFFER_SIZE];
+    snprintf(url, BUFFER_SIZE, "%s://%s:%d", req->ssl ? "https" : "http", req->url, req->port);
+
+    HINTERNET hConnect = InternetOpenUrl(hInternet, url, NULL, 0, flags, 0);
+    if (!hConnect) {
+        fprintf(stderr, "Failed to connect to %s: %ld\n", url, GetLastError());
+        InternetCloseHandle(hInternet);
+        return;
+    }
+
+    set_request_headers(hConnect, req);
+
+    char buffer[BUFFER_SIZE];
+    DWORD bytes_read;
+    while (InternetReadFile(hConnect, buffer, sizeof(buffer) - 1, &bytes_read) && bytes_read > 0) {
+        buffer[bytes_read] = '\0';
+    }
+
+    InternetCloseHandle(hConnect);
+    InternetCloseHandle(hInternet);
 }
 
 DWORD WINAPI thread_func(LPVOID param) {
     Requester *req = (Requester *)param;
-    while (1) {
-        send_request(req);
-    }
+    send_request(req);
     return 0;
 }
 
 int main() {
     srand((unsigned int)time(NULL));
-    
+
     Requester req;
     req.url = malloc(BUFFER_SIZE);
     if (req.url == NULL) {
-        printf("Memory allocation failed.\n");
+        fprintf(stderr, "Memory allocation failed.\n");
         return 1;
     }
     req.port = 80;
@@ -120,7 +122,7 @@ int main() {
 
     printf("Enter the URL or IP address: ");
     if (fgets(req.url, BUFFER_SIZE, stdin) == NULL) {
-        printf("Failed to read URL input.\n");
+        fprintf(stderr, "Failed to read URL input.\n");
         free(req.url);
         return 1;
     }
@@ -128,7 +130,7 @@ int main() {
 
     printf("Enter the port number (e.g., 80): ");
     if (scanf("%d", &req.port) != 1) {
-        printf("Failed to read port number.\n");
+        fprintf(stderr, "Failed to read port number.\n");
         free(req.url);
         return 1;
     }
@@ -138,14 +140,18 @@ int main() {
         req.ssl = TRUE;
     }
 
-    const int num_threads = 100000;
-    HANDLE threads[num_threads];
+    int num_threads = DEFAULT_THREAD_COUNT;
+    HANDLE *threads = malloc(sizeof(HANDLE) * num_threads);
+    if (!threads) {
+        fprintf(stderr, "Failed to allocate memory for threads.\n");
+        free(req.url);
+        return 1;
+    }
+
     for (int i = 0; i < num_threads; i++) {
         threads[i] = CreateThread(NULL, 0, thread_func, &req, 0, NULL);
-        if (threads[i]) {
-            printf("Thread %d created successfully.\n", i);
-        } else {
-            printf("Failed to create thread %d: %ld\n", i, GetLastError());
+        if (!threads[i]) {
+            fprintf(stderr, "Failed to create thread %d: %ld\n", i, GetLastError());
         }
     }
 
@@ -155,6 +161,7 @@ int main() {
         CloseHandle(threads[i]);
     }
 
+    free(threads);
     free(req.url);
     return 0;
 }
